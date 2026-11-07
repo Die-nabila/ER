@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>English Reader · installation check</title>
+<style>
+  body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 18px 16px 60px; background: #fbf3f3; color: #3a2a2e; max-width: 760px; margin-inline: auto; }
+  h1 { margin: 6px 0 4px; font-size: 24px; } h2 { margin: 26px 0 8px; font-size: 16px; text-transform: uppercase; letter-spacing: .06em; color: #86686f; }
+  p.sub { margin: 0 0 14px; color: #6e5058; }
+  .v { padding: 12px 14px; border-radius: 14px; margin: 8px 0; line-height: 1.45; }
+  .v.ok { background: #f4e1e3; } .v.warn { background: #fdeccc; } .v.bad { background: #f9e0d9; color: #7a2f22; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; background: #fff; border-radius: 12px; overflow: hidden; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #efdcdf; vertical-align: top; word-break: break-word; }
+  th { background: #f1dcdd; font-weight: 700; }
+  td.ok { color: #7e4351; font-weight: 700; } td.bad { color: #b0402f; font-weight: 700; } td.warn { color: #8a5a00; font-weight: 700; }
+  button, a.btn { font: inherit; font-weight: 700; padding: 11px 16px; border-radius: 14px; border: 0; background: #a65d6b; color: #fff; text-decoration: none; display: inline-block; margin: 4px 6px 4px 0; }
+  a.btn.alt { background: #f4e1e3; color: #7e4351; }
+  pre { background: #fff; padding: 10px 12px; border-radius: 12px; white-space: pre-wrap; font-size: 12.5px; }
+  code { background: #fff; padding: 1px 5px; border-radius: 5px; }
+</style>
+</head>
+<body>
+<h1>Installation check</h1>
+<p class="sub">This page only <b>reads</b>. It never changes or deletes your books, vocabulary, reading progress or settings.</p>
+<div id="verdict"><div class="v warn">Checking…</div></div>
+<p><button id="upd">Check for an update now</button><a class="btn alt" href="./">Open English Reader</a><button id="again" style="background:#f4e1e3;color:#7e4351">Run the check again</button></p>
+<pre id="log" hidden></pre>
+
+<h2>What is running</h2>
+<table id="run"></table>
+<h2>Files</h2>
+<p class="sub">“Server” asks the website directly. “Saved copy” is the offline copy kept by the app. “Served to the page” is what the app actually receives.</p>
+<table id="files"></table>
+<h2>Service worker</h2>
+<table id="sw"></table>
+
+<script>
+(function () {
+  var FILES = ['index.html', 'style.css', 'app.js', 'lex.js', 'paginate.js', 'chapters.js', 'manifest.webmanifest', 'sw.js',
+    'vendor/jszip.min.js', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs', 'icons/icon-192.png', 'icons/icon-512.png'];
+  var TEXT = /\.(js|mjs|html|css|webmanifest)$/;
+  var MARK = { 'index.html': /name="app-build"\s+content="([^"]+)"/, 'app.js': /APP_BUILD\s*=\s*'([^']+)'/, 'sw.js': /const BUILD\s*=\s*'([^']+)'/ };
+  var $ = function (s) { return document.querySelector(s); };
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+  var abs = function (f) { return new URL(f, location.href).href; };
+  var mark = function (f, text) { var m = MARK[f] && text && text.match(MARK[f]); return m ? m[1] : ''; };
+
+  async function head(f) {                                   // HEAD requests are never handled by the service worker: this is the server's own answer
+    try { var r = await fetch(abs(f), { method: 'HEAD', cache: 'no-store' }); return { status: r.status, etag: r.headers.get('etag') || '', lm: r.headers.get('last-modified') || '' }; }
+    catch (e) { return { status: 0, etag: '', lm: '' }; }
+  }
+  async function saved(f) {                                  // every saved copy, per cache
+    var out = [];
+    try {
+      for (var k of await caches.keys()) {
+        var hit = await (await caches.open(k)).match(abs(f), { ignoreSearch: true });
+        if (hit) out.push({ cache: k, etag: hit.headers.get('etag') || '', lm: hit.headers.get('last-modified') || '', text: TEXT.test(f) ? await hit.clone().text() : '' });
+      }
+    } catch (e) { }
+    return out;
+  }
+  async function served(f) {                                 // a normal request: what the page really receives (through the service worker)
+    try { var r = await fetch(abs(f) + '?check=' + Date.now()); return { status: r.status, text: TEXT.test(f) && r.ok ? await r.text() : '' }; }
+    catch (e) { return { status: 0, text: '' }; }
+  }
+  var same = function (a, b) { return a.etag && b.etag ? a.etag === b.etag : (a.lm && b.lm ? a.lm === b.lm : null); };
+
+  async function run() {
+    var verdict = [], rows = [], bad = [], stale = [], res = {};
+    for (var f of FILES) {
+      var net = await head(f), cps = await saved(f), srv = await served(f);
+      res[f] = { net: net, cps: cps, srv: srv };
+      var cell = '';
+      if (net.status !== 200) bad.push(f + ' (' + (net.status || 'unreachable') + ')');
+      cps.forEach(function (c) { var s = net.status === 200 ? same(c, net) : null; if (s === false && f !== 'sw.js') stale.push(f + ' in ' + c.cache); });
+      rows.push('<tr><td>' + esc(f) + '</td><td class="' + (net.status === 200 ? 'ok' : 'bad') + '">' + (net.status === 200 ? 'found' : 'MISSING (' + (net.status || 'no answer') + ')') + '</td><td>' +
+        (cps.length ? cps.map(function (c) { var s = net.status === 200 ? same(c, net) : null; return esc(c.cache) + (s === true ? ' ✓ current' : s === false ? ' <span class="warn" style="color:#8a5a00;font-weight:700">older than the server</span>' : ''); }).join('<br>') : '–') +
+        '</td><td>' + (srv.status === 200 ? 'ok' : srv.status || 'error') + (mark(f, srv.text) ? ' · build ' + esc(mark(f, srv.text)) : '') + '</td></tr>');
+    }
+    $('#files').innerHTML = '<tr><th>File</th><th>Server</th><th>Saved copy</th><th>Served to the page</th></tr>' + rows.join('');
+
+    var idxB = mark('index.html', res['index.html'].srv.text), appB = mark('app.js', res['app.js'].srv.text), swB = mark('sw.js', res['sw.js'].srv.text);
+    var cacheNames = []; try { cacheNames = (await caches.keys()).filter(function (k) { return k.indexOf('english-reader-') === 0; }); } catch (e) { }
+    var regs = []; try { regs = await navigator.serviceWorker.getRegistrations(); } catch (e) { }
+    var ctl = navigator.serviceWorker && navigator.serviceWorker.controller;
+    $('#run').innerHTML =
+      '<tr><th>Page (index.html)</th><td>' + esc(idxB || 'no build marker — an old index.html') + '</td></tr>' +
+      '<tr><th>Script (app.js)</th><td>' + esc(appB || 'no build marker — an old app.js') + '</td></tr>' +
+      '<tr><th>Service worker file on the server</th><td>' + esc(swB || 'no build marker — an old sw.js') + '</td></tr>' +
+      '<tr><th>Offline copies on this phone</th><td>' + esc(cacheNames.join(', ') || 'none') + '</td></tr>' +
+      '<tr><th>Controlled by a service worker</th><td>' + (ctl ? 'yes' : 'no') + '</td></tr>';
+    $('#sw').innerHTML = regs.length ? '<tr><th>Scope</th><th>Active</th><th>Waiting</th><th>Installing</th></tr>' + regs.map(function (r) {
+      var d = function (w) { return w ? esc(w.state) + ' · ' + esc(w.scriptURL.replace(location.origin, '')) : '–'; };
+      return '<tr><td>' + esc(r.scope.replace(location.origin, '')) + '</td><td>' + d(r.active) + '</td><td>' + d(r.waiting) + '</td><td>' + d(r.installing) + '</td></tr>';
+    }).join('') : '<tr><td>No service worker registered (the app has not been opened as an installed app yet, or this browser blocks it).</td></tr>';
+
+    if (bad.length) verdict.push(['bad', '<b>These files are not on the website:</b> ' + esc(bad.join(', ')) + '.<br>Upload them next to <code>index.html</code>, keeping the <code>vendor</code> and <code>icons</code> folders. Until then the app cannot run the new version.']);
+    if (!idxB || !appB) verdict.push(['bad', '<b>The website is still serving an old ' + (!idxB ? 'index.html' : 'app.js') + '</b> (it has no build marker). The new files were not uploaded to the folder this address serves.']);
+    else if (idxB !== appB) verdict.push(['bad', '<b>Mixed versions:</b> index.html is ' + esc(idxB) + ' but app.js is ' + esc(appB) + '. Upload the complete set of files.']);
+    if (swB && cacheNames.length && cacheNames.indexOf('english-reader-' + swB) < 0) verdict.push(['warn', 'The website has service worker <b>' + esc(swB) + '</b> but this phone still runs <b>' + esc(cacheNames.join(', ')) + '</b>. Tap “Check for an update now”, then close and reopen English Reader.']);
+    if (stale.length) verdict.push(['warn', '<b>Saved offline copies older than the website:</b> ' + esc(stale.slice(0, 6).join(', ')) + (stale.length > 6 ? '…' : '') + '. The newer service worker refreshes these automatically on the next load.']);
+    if (regs.some(function (r) { return r.waiting; })) verdict.push(['warn', 'A newer version is waiting. Close English Reader completely and open it again.']);
+    if (!verdict.length) verdict.push(['ok', '<b>Everything is consistent.</b> Page, script and service worker are build <b>' + esc(appB) + '</b>, every file is on the website, and the offline copies match it.']);
+    $('#verdict').innerHTML = verdict.map(function (v) { return '<div class="v ' + v[0] + '">' + v[1] + '</div>'; }).join('');
+    return { verdict: verdict, res: res, idxB: idxB, appB: appB, swB: swB, bad: bad, stale: stale, cacheNames: cacheNames };
+  }
+
+  async function update() {
+    var log = $('#log'); log.hidden = false; log.textContent = '';
+    var say = function (t) { log.textContent += t + '\n'; };
+    try {
+      var reg = await navigator.serviceWorker.getRegistration();
+      if (!reg) { say('No service worker is registered yet. Open English Reader once, then run this again.'); return; }
+      say('Asking the browser to look for a newer service worker…');
+      var done = new Promise(function (res) {
+        var t = setTimeout(function () { res('no newer version was found (or it is the same file)'); }, 15000);
+        reg.addEventListener('updatefound', function () {
+          var w = reg.installing; say('A newer service worker was found: installing…');
+          w.addEventListener('statechange', function () {
+            say('  → ' + w.state);
+            if (w.state === 'activated') { clearTimeout(t); res('the new version is active — close English Reader completely and open it again'); }
+            if (w.state === 'redundant') { clearTimeout(t); res('the new version FAILED to install (usually because a file listed in sw.js is missing on the website — see the verdict above)'); }
+          });
+        });
+      });
+      await reg.update();
+      say('Result: ' + await done);
+    } catch (e) { say('Could not check: ' + e.message); }
+    run();
+  }
+  $('#upd').addEventListener('click', update);
+  $('#again').addEventListener('click', function () { $('#verdict').innerHTML = '<div class="v warn">Checking…</div>'; run(); });
+  window.__checkDone = run();
+})();
+</script>
+</body>
+</html>
